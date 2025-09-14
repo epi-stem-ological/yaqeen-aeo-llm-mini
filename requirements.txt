@@ -1,0 +1,9 @@
+﻿pandas
+openpyxl
+requests
+beautifulsoup4
+lxml
+tldextract
+tenacity
+pydantic
+playwright

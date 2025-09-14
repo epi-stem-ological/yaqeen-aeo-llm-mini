@@ -1,0 +1,14 @@
+@"
+# Keep local inputs/outputs out of Git
+data/inputs/*
+data/derived/*
+outputs/*
+
+# Python junk
+.venv/
+__pycache__/
+*.pyc
+
+# VS Code settings (optional)
+.vscode/
+"@ | Set-Content -Encoding utf8 .gitignore

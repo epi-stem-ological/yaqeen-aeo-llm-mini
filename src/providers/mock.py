@@ -24,3 +24,9 @@ class MockProvider(Provider):
             cited_urls=cited_urls,
             raw_urls=urls,
         )
+# --- CLI adapter ---
+# Provide a module-level function so the CLI can call `mock.search`
+_provider = MockProvider()
+
+def search(query: str, target_domain: str) -> ProviderResult:
+    return MockProvider().probe(query, target_domain)

@@ -1,44 +1,72 @@
+# src/cli.py
+from __future__ import annotations
 import argparse
-from typing import Dict, Callable, List
-from .models import SearchResult
-from .utils.domain import domain_matches
+import csv
+from typing import Callable, Dict, Iterable, List
 
-# Providers
-from .providers import mock
-try:
-    from .providers import bing_api  # optional
-    HAS_BING = True
-except Exception:
-    HAS_BING = False
+from src.providers.base import ProviderResult
+from src.providers import mock
 
-ProviderFn = Callable[[str, int], List[SearchResult]]
+ProviderFn = Callable[[str, str], ProviderResult]
 
-PROVIDERS: Dict[str, ProviderFn] = {"mock": mock.search}
-if HAS_BING:
-    PROVIDERS["bing"] = bing_api.search
+PROVIDERS: Dict[str, ProviderFn] = {
+    "mock": mock.search,
+}
 
-def main():
-    ap = argparse.ArgumentParser(description="Check if search results cite a target domain.")
-    ap.add_argument("query", help="Search query (e.g. 'what is hadith')")
-    ap.add_argument("--provider", choices=sorted(PROVIDERS.keys()), default="mock", help="Search provider")
-    ap.add_argument("--target-domain", default="yaqeeninstitute.org", help="Domain to look for")
-    ap.add_argument("--count", type=int, default=10, help="Number of results to inspect")
-    args = ap.parse_args()
+def _iter_questions(inputs_path: str | None, single_query: str | None) -> Iterable[str]:
+    def _clean(s: str) -> str:
+        return s.lstrip("\ufeff").strip()  # remove BOM if present, then trim
 
-    results = PROVIDERS[args.provider](args.query, args.count)
-
-    found_any = False
-    for i, r in enumerate(results, 1):
-        is_match = domain_matches(r.url, args.target_domain)
-        if is_match:
-            found_any = True
-        mark = "Y" if is_match else " "
-        print(f"{i:2}. [{mark}] {r.title} — {r.url}")
-
-    if found_any:
-        print(f"\n✅ Found at least one result from {args.target_domain}")
+    if inputs_path:
+        # utf-8-sig auto-strips a BOM at the start of the file
+        with open(inputs_path, "r", encoding="utf-8-sig") as f:
+            for line in f:
+                q = _clean(line)
+                if q:
+                    yield q
     else:
-        print(f"\n❌ No results from {args.target_domain}")
+        assert single_query is not None
+        yield _clean(single_query)
+
+def _write_csv(results: List[ProviderResult], path: str) -> None:
+    fieldnames = ["question", "engine", "cited", "cited_urls", "raw_urls"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in results:
+            w.writerow({
+                "question": r.question,
+                "engine": r.engine,
+                "cited": str(r.cited),
+                "cited_urls": ";".join(r.cited_urls),
+                "raw_urls": ";".join(r.raw_urls),
+            })
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--provider", choices=PROVIDERS.keys(), default="mock")
+    # accept both --target-domain and --domain
+    p.add_argument("--target-domain", "--domain", dest="target_domain", required=True)
+    p.add_argument("--inputs", help="Path to a newline-delimited questions file")
+    p.add_argument("--output", help="Path to write CSV results")
+    p.add_argument("query", nargs="?", help="Single question if --inputs not provided")
+    args = p.parse_args()
+
+    if not args.inputs and not args.query:
+        p.error("Provide a QUERY or --inputs <file>.")
+
+    provider = PROVIDERS[args.provider]
+    results: List[ProviderResult] = []
+
+    for q in _iter_questions(args.inputs, args.query):
+        r = provider(q, args.target_domain)
+        results.append(r)
+        if not args.output:
+            print(f"[{r.engine}] {q} -> cited={r.cited} "
+                  f"cited_urls={r.cited_urls} raw_urls={r.raw_urls}")
+
+    if args.output:
+        _write_csv(results, args.output)
 
 if __name__ == "__main__":
     main()

@@ -3,17 +3,18 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone   # <-- added
 from typing import Callable, Dict, Iterable, List
 
 from src.providers.base import ProviderResult
-from src.providers import mock, bing  # <- we have mock.py and bing.py
+from src.providers import mock, bing  # providers we have
 
 # A provider is any callable that takes (query, target_domain) -> ProviderResult
 ProviderFn = Callable[[str, str], ProviderResult]
 
 PROVIDERS: Dict[str, ProviderFn] = {
     "mock": mock.search,
-    "bing": bing.search,  # <-- use this name on the CLI
+    "bing": bing.search,
 }
 
 def _iter_questions(inputs_path: str | None, single_query: str | None) -> Iterable[str]:
@@ -34,7 +35,8 @@ def _iter_questions(inputs_path: str | None, single_query: str | None) -> Iterab
         yield _clean(single_query)
 
 def _write_csv(results: List[ProviderResult], path: str) -> None:
-    fieldnames = ["question", "engine", "cited", "cited_urls", "raw_urls"]
+    fieldnames = ["question", "engine", "cited", "cited_urls", "raw_urls", "timestamp"]  # <-- added timestamp
+    now_iso = datetime.now(timezone.utc).isoformat()  # <-- added
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -45,6 +47,7 @@ def _write_csv(results: List[ProviderResult], path: str) -> None:
                 "cited": str(r.cited),
                 "cited_urls": ";".join(r.cited_urls),
                 "raw_urls": ";".join(r.raw_urls),
+                "timestamp": now_iso,  # <-- added
             })
 
 def main() -> None:

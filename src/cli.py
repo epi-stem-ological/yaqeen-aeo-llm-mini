@@ -1,24 +1,29 @@
 # src/cli.py
 from __future__ import annotations
+
 import argparse
 import csv
 from typing import Callable, Dict, Iterable, List
 
 from src.providers.base import ProviderResult
-from src.providers import mock
+from src.providers import mock, bing  # <- we have mock.py and bing.py
 
+# A provider is any callable that takes (query, target_domain) -> ProviderResult
 ProviderFn = Callable[[str, str], ProviderResult]
 
 PROVIDERS: Dict[str, ProviderFn] = {
     "mock": mock.search,
+    "bing": bing.search,  # <-- use this name on the CLI
 }
 
 def _iter_questions(inputs_path: str | None, single_query: str | None) -> Iterable[str]:
+    """Yield questions from a file (one per line) or a single CLI query.
+    Strips any UTF-8 BOM and surrounding whitespace.
+    """
     def _clean(s: str) -> str:
-        return s.lstrip("\ufeff").strip()  # remove BOM if present, then trim
+        return s.lstrip("\ufeff").strip()
 
     if inputs_path:
-        # utf-8-sig auto-strips a BOM at the start of the file
         with open(inputs_path, "r", encoding="utf-8-sig") as f:
             for line in f:
                 q = _clean(line)
@@ -43,13 +48,17 @@ def _write_csv(results: List[ProviderResult], path: str) -> None:
             })
 
 def main() -> None:
-    p = argparse.ArgumentParser()
-    p.add_argument("--provider", choices=PROVIDERS.keys(), default="mock")
+    p = argparse.ArgumentParser(
+        description="Probe whether search results cite a specific target domain.",
+    )
+    p.add_argument("--provider", choices=sorted(PROVIDERS.keys()), default="mock",
+                   help="Which search provider to use.")
     # accept both --target-domain and --domain
-    p.add_argument("--target-domain", "--domain", dest="target_domain", required=True)
-    p.add_argument("--inputs", help="Path to a newline-delimited questions file")
-    p.add_argument("--output", help="Path to write CSV results")
-    p.add_argument("query", nargs="?", help="Single question if --inputs not provided")
+    p.add_argument("--target-domain", "--domain", dest="target_domain", required=True,
+                   help="Domain you expect/hope to see in the citations (e.g., yaqeeninstitute.org).")
+    p.add_argument("--inputs", help="Path to a newline-delimited questions file.")
+    p.add_argument("--output", help="Path to write CSV results. If omitted, prints to stdout.")
+    p.add_argument("query", nargs="?", help="Single question if --inputs is not provided.")
     args = p.parse_args()
 
     if not args.inputs and not args.query:

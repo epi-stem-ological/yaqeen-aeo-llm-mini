@@ -1,73 +1,84 @@
 # src/providers/bing.py
+from __future__ import annotations
+import os
+import requests
 from typing import List
-from urllib.parse import quote_plus
-import time
-
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-from src.providers.base import Provider, ProviderResult
+from src.providers.base import ProviderResult
 from src.utils.domain import domain_matches
 
-class BingProvider(Provider):
+def _bing_base_and_path(endpoint: str) -> str:
+    """Normalize endpoint and choose the correct path."""
+    endpoint = endpoint.rstrip("/")
+    # If you use the global Bing endpoint, path is /v7.0/search
+    # If you use an Azure AI Services (Cognitive Services) endpoint, path is /bing/v7.0/search
+    if "api.bing.microsoft.com" in endpoint:
+        return f"{endpoint}/v7.0/search"
+    else:
+        return f"{endpoint}/bing/v7.0/search"
+
+def search(question: str, target_domain: str) -> ProviderResult:
     """
-    Scrapes Bing web results (public SERP) for a query and checks if target domain appears.
-    Uses Playwright (Chromium). No login. Be gentle with --delay.
+    Query Bing Web Search and return a ProviderResult.
+    Reads creds from:
+      - BING_SEARCH_KEY        (required)
+      - BING_SEARCH_ENDPOINT   (required; e.g. https://<your-resource>.cognitiveservices.azure.com
+                                or https://api.bing.microsoft.com)
     """
-    name = "bing-web"
+    key = os.getenv("BING_SEARCH_KEY")
+    endpoint = os.getenv("BING_SEARCH_ENDPOINT")
 
-    def __init__(self, headless: bool = True, delay: float = 6.0, max_results: int = 10):
-        self.headless = headless
-        self.delay = delay
-        self.max_results = max_results
-        self._play = None
-        self._browser = None
-        self._context = None
-        self._page = None
+    if not key:
+        raise RuntimeError("Missing BING_SEARCH_KEY environment variable.")
+    if not endpoint:
+        raise RuntimeError("Missing BING_SEARCH_ENDPOINT environment variable.")
 
-    def __enter__(self):
-        self._play = sync_playwright().start()
-        self._browser = self._play.chromium.launch(headless=self.headless)
-        self._context = self._browser.new_context()
-        self._page = self._context.new_page()
-        return self
+    url = _bing_base_and_path(endpoint)
+    headers = {"Ocp-Apim-Subscription-Key": key}
+    params = {
+        "q": question,
+        "count": 10,
+        "responseFilter": "Webpages",
+        "textDecorations": "false",
+        "textFormat": "Raw",
+        # optionally: "mkt": "en-US",
+        # optionally: "safeSearch": "Moderate",
+    }
 
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            if self._context:
-                self._context.close()
-            if self._browser:
-                self._browser.close()
-        finally:
-            if self._play:
-                self._play.stop()
-
-    def _search_links(self, q: str) -> List[str]:
-        url = f"https://www.bing.com/search?q={quote_plus(q)}"
-        self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        self._page.wait_for_selector("#b_content", timeout=30000)
-
-        links: List[str] = []
-        # organic result selectors
-        for a in self._page.query_selector_all("li.b_algo h2 a, ol#b_results li h2 a"):
-            href = a.get_attribute("href")
-            if href and href.startswith("http"):
-                links.append(href)
-                if len(links) >= self.max_results:
-                    break
-        return links
-
-    def probe(self, question: str, target_domain: str) -> ProviderResult:
-        if self.delay:
-            time.sleep(self.delay)  # politeness between requests
-        try:
-            urls = self._search_links(question)
-        except PWTimeout:
-            urls = []
-
-        cited_urls = [u for u in urls if domain_matches(u, target_domain)]
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.HTTPError as e:
+        # On HTTP errors, return an empty result but keep raw error in raw_urls for debugging
         return ProviderResult(
             question=question,
-            engine=self.name,
-            cited=bool(cited_urls),
-            cited_urls=cited_urls,
-            raw_urls=urls,
+            engine="bing",
+            cited=False,
+            cited_urls=[],
+            raw_urls=[f"HTTPError {resp.status_code}: {getattr(resp, 'text', '')[:200]}"],
         )
+    except Exception as e:
+        return ProviderResult(
+            question=question,
+            engine="bing",
+            cited=False,
+            cited_urls=[],
+            raw_urls=[f"Error: {e}"],
+        )
+
+    items = (data.get("webPages") or {}).get("value") or []
+    raw_urls: List[str] = []
+    for it in items:
+        u = it.get("url")
+        if u:
+            raw_urls.append(u)
+
+    cited_urls = [u for u in raw_urls if domain_matches(u, target_domain)]
+
+    return ProviderResult(
+        question=question,
+        engine="bing",
+        cited=bool(cited_urls),
+        cited_urls=cited_urls,
+        raw_urls=raw_urls,
+    )

@@ -1,0 +1,113 @@
+# src/providers/azure_bing.py
+
+git add src/providers/azure_bing
+git commit -m "docs(azure-agents): add WIP provider scaffold"
+git push
+
+from __future__ import annotations
+import os
+import re
+from typing import List
+
+from azure.identity import DefaultAzureCredential, InteractiveBrowserCredential
+from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import BingGroundingTool  # class name per SDK
+# Blog sample shows this tool and pattern with connections. 
+
+from src.providers.base import Provider, ProviderResult
+from src.utils.domain import domain_matches
+
+
+_URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
+
+def _get_credential():
+    # After `az login`, DefaultAzureCredential will pick up your CLI token.
+    # If not, we fall back to interactive browser.
+    try:
+        return DefaultAzureCredential(exclude_managed_identity_credential=True)
+    except Exception:
+        return InteractiveBrowserCredential()
+
+def _extract_urls_from_messages(messages) -> List[str]:
+    """Very simple extractor: scan assistant text for URLs."""
+    urls: List[str] = []
+    try:
+        # Messages shape may evolve; we defensively inspect text content
+        for m in messages:
+            # Only look at assistant replies
+            if getattr(m, "role", None) != "assistant":
+                continue
+            # Some SDKs expose m.content as a list of parts with 'text'
+            content = getattr(m, "content", None)
+            if isinstance(content, list):
+                for part in content:
+                    text = getattr(part, "text", None) or str(part)
+                    urls += _URL_RE.findall(text or "")
+            else:
+                urls += _URL_RE.findall(str(content or ""))
+    except Exception:
+        pass
+    # De-dupe while preserving order
+    seen = set()
+    out = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            out.append(u.rstrip(').,]'))  # trim common trailing punctuation
+    return out
+
+class AzureBingProvider(Provider):
+    """Provider that uses Azure AI Agents with Grounding (Bing Search)."""
+    name = "azure-bing"
+
+    def __init__(self):
+        endpoint = os.environ.get("AZURE_AI_FOUNDRY_PROJECT_ENDPOINT")
+        conn_id = os.environ.get("AIF_BING_CONNECTION_ID")
+        model = os.environ.get("AIF_MODEL_DEPLOYMENT")
+        if not endpoint or not conn_id or not model:
+            raise RuntimeError("Missing one of: AZURE_AI_FOUNDRY_PROJECT_ENDPOINT, AIF_BING_CONNECTION_ID, AIF_MODEL_DEPLOYMENT")
+        self.endpoint = endpoint
+        self.connection_id = conn_id
+        self.model = model
+        self.credential = _get_credential()
+
+        self._proj = AIProjectClient.from_endpoint(self.endpoint, credential=self.credential)
+        self._agents = self._proj.agents.get_client()
+
+    def probe(self, question: str, target_domain: str) -> ProviderResult:
+        # Create an agent with Bing grounding tool
+        agent = self._agents.agents.create(
+            model=self.model,
+            instructions=(
+                "You are a helpful research assistant. Use the Bing Grounding tool "
+                "to search the web and answer briefly. Include the best 3–5 source links."
+            ),
+            tools=[BingGroundingTool(connection_id=self.connection_id)],
+        )
+        thread = self._agents.threads.create()
+
+        self._agents.messages.create(
+            thread_id=thread.id,
+            role="user",
+            content=question,
+        )
+
+        # Run and wait
+        _ = self._agents.runs.create_and_poll(thread_id=thread.id, agent_id=agent.id)
+
+        # Collect assistant messages and pull out URLs
+        msgs = list(self._agents.messages.list(thread_id=thread.id))
+        urls = _extract_urls_from_messages(msgs)
+        cited_urls = [u for u in urls if domain_matches(u, target_domain)]
+
+        return ProviderResult(
+            question=question,
+            engine=self.name,
+            cited=bool(cited_urls),
+            cited_urls=cited_urls,
+            raw_urls=urls,
+        )
+
+# --- function adapter for the CLI mapping ---
+def search(question: str, target_domain: str) -> ProviderResult:
+    return AzureBingProvider().probe(question, target_domain)
